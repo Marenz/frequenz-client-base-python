@@ -50,11 +50,24 @@ class GrpcStreamBroadcaster(Generic[InputT, OutputT]):
         self._retry_strategy = (
             retry.LinearBackoff() if retry_strategy is None else retry_strategy.copy()
         )
+        self._task: asyncio.Task[None] | None = None
+        self._channel: channels.Broadcast[OutputT]
 
-        self._channel: channels.Broadcast[OutputT] = channels.Broadcast(
-            name=f"GrpcStreamBroadcaster-{stream_name}"
-        )
+        self.start()
+
+    def start(self) -> None:
+        """Start the streaming helper.
+
+        Should be called after the channel was closed to restart the stream.
+        """
+        if self._task is not None and not self._task.done():
+            return
+
+        self._retry_strategy.reset()
         self._task = asyncio.create_task(self._run())
+        self._channel = channels.Broadcast(
+            name=f"GrpcStreamBroadcaster-{self._stream_name}"
+        )
 
     def new_receiver(self, maxsize: int = 50) -> channels.Receiver[OutputT]:
         """Create a new receiver for the stream.
@@ -65,11 +78,17 @@ class GrpcStreamBroadcaster(Generic[InputT, OutputT]):
         Returns:
             A new receiver.
         """
+        if self._channel.is_closed:
+            _logger.warning(
+                "%s: stream has stopped, starting a new one.", self._stream_name
+            )
+            self.start()
+
         return self._channel.new_receiver(limit=maxsize)
 
     async def stop(self) -> None:
         """Stop the streaming helper."""
-        if self._task.done():
+        if not self._task or self._task.done():
             return
         self._task.cancel()
         try:

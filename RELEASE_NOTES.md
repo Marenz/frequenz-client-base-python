@@ -11,7 +11,7 @@
 
 ## New Features
 
-<!-- Here goes the main new features and examples or instructions on how to use them -->
+- `GrpcStreamBroadcaster` now supports restarting a stream once the retry strategy is exhausted. The new method `start()` can be used for this, but it will also implicitly restart when `new_receiver()` is called on an exhausted stream.
 
 ## Bug Fixes
 

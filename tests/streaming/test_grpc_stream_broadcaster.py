@@ -237,3 +237,101 @@ async def test_retry_next_interval_zero(  # pylint: disable=too-many-arguments
             f"giving up. Error: {expected_error_str}.",
         ),
     ]
+
+
+async def test_new_receiver_after_error(
+    no_retry: mock.MagicMock,  # pylint: disable=redefined-outer-name
+    receiver_ready_event: asyncio.Event,  # pylint: disable=redefined-outer-name
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Test that creating a new receiver after an error restarts the stream."""
+    caplog.set_level(logging.INFO)
+    error = grpc.aio.AioRpcError(
+        code=_NamedMagicMock(name="mock grpc code"),
+        initial_metadata=mock.MagicMock(),
+        trailing_metadata=mock.MagicMock(),
+        details="mock details",
+        debug_error_string="mock debug_error_string",
+    )
+    # Use the no_retry strategy
+    helper = streaming.GrpcStreamBroadcaster(
+        stream_name="test_helper",
+        stream_method=lambda: _ErroringAsyncIter(
+            error, receiver_ready_event, num_successes=1
+        ),
+        transform=_transformer,
+        retry_strategy=no_retry,
+    )
+
+    items: list[str] = []
+    async with AsyncExitStack() as stack:
+        stack.push_async_callback(helper.stop)
+
+        receiver = helper.new_receiver()
+        receiver_ready_event.set()
+        # Consume the first item before the error occurs
+        async for item in receiver:
+            items.append(item)
+
+        # Wait for the helper's task to complete
+        assert helper._task
+        await helper._task
+        assert helper._task.done()
+
+        # At this point, the stream has ended due to the error
+        # Now, create a new receiver after the error
+        with mock.patch.object(helper, "start", wraps=helper.start) as mock_start:
+            receiver = helper.new_receiver()
+            # Ensure that helper.start() is called when the channel is closed
+            mock_start.assert_called_once()
+
+        # Reset the event to allow the new stream to proceed
+        receiver_ready_event.clear()
+        receiver_ready_event.set()
+        async for item in receiver:
+            items.append(item)
+
+    # Verify that items from both streams are collected
+    assert items == ["transformed_0", "transformed_0"]
+
+    # Optionally, verify the logging output
+    expected_logs = [
+        (
+            "frequenz.client.base.streaming",
+            logging.INFO,
+            "test_helper: starting to stream",
+        ),
+        (
+            "frequenz.client.base.streaming",
+            logging.ERROR,
+            "test_helper: connection ended, retry limit exceeded (mock progress), "
+            "giving up. Error: "
+            "<AioRpcError of RPC that terminated with:\n"
+            "\tstatus = mock grpc code\n"
+            '\tdetails = "mock details"\n'
+            '\tdebug_error_string = "mock debug_error_string"\n'
+            ">.",
+        ),
+        (
+            "frequenz.client.base.streaming",
+            logging.WARNING,
+            "test_helper: stream has stopped, starting a new one.",
+        ),
+        (
+            "frequenz.client.base.streaming",
+            logging.INFO,
+            "test_helper: starting to stream",
+        ),
+        (
+            "frequenz.client.base.streaming",
+            logging.ERROR,
+            "test_helper: connection ended, retry limit exceeded (mock progress), "
+            "giving up. Error: "
+            "<AioRpcError of RPC that terminated with:\n"
+            "\tstatus = mock grpc code\n"
+            '\tdetails = "mock details"\n'
+            '\tdebug_error_string = "mock debug_error_string"\n'
+            ">.",
+        ),
+    ]
+    assert caplog.record_tuples == expected_logs
